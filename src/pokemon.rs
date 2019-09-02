@@ -32,7 +32,7 @@ pub struct PokemonForm {
 
 impl Display for PokemonForm {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        if let Some(n) = self.name.as_ref() {
+        if let Some(n) = &self.name {
             write!(f, "{} - {}", self.species.name, n)
         } else {
             write!(f, "{}", self.species.name)
@@ -63,11 +63,13 @@ pub struct Pokemon {
     pub iv: Stats,
     pub ability: Ability,
     pub item: Option<Item>,
+
+    pub current_hp: u32,
 }
 
 impl Display for Pokemon {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        if let Some(n) = self.nickname.as_ref() {
+        if let Some(n) = &self.nickname {
             write!(f, "{} ({})", n, self.form)
         } else {
             write!(f, "{}", self.form)
@@ -75,7 +77,7 @@ impl Display for Pokemon {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub enum AllowedGenders {
     MaleOrFemale,
     MaleOnly,
@@ -92,16 +94,31 @@ impl AllowedGenders {
             AllowedGenders::NoGender => &[Gender::None],
         }
     }
+
+    pub fn includes(&self, gender: Gender) -> bool {
+        match (self, gender) {
+            (AllowedGenders::MaleOrFemale, Gender::Male) => true,
+            (AllowedGenders::MaleOrFemale, Gender::Female) => true,
+
+            (AllowedGenders::FemaleOnly, Gender::Female) => true,
+
+            (AllowedGenders::MaleOnly, Gender::Male) => true,
+
+            (AllowedGenders::NoGender, Gender::None) => true,
+
+            _ => false,
+        }
+    }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub enum Gender {
     None,
     Male,
     Female,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub enum PokeType {
     Normal,
     Fire,

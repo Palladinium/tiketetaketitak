@@ -1,46 +1,38 @@
-use std::fmt::{self, Debug, Formatter};
+use std::{
+    fmt::{self, Debug, Formatter},
+    ops::Try,
+};
 
-use arrayvec::ArrayVec;
+pub trait StateBase: Clone + Debug {
+    type Player: PlayerBase;
+    type PlayerState: PlayerStateBase;
 
-use crate::pokemon::Pokemon;
+    fn player(&self, player: Self::Player) -> &Self::PlayerState;
+    fn player_mut(&mut self, player: Self::Player) -> &mut Self::PlayerState;
 
-pub trait State: Clone {
-    type Player: Debug + Clone;
-
-    fn active_pokemon(&self) -> ActivePokemon<'_>;
-
-    fn chance<N, I, T, S, F>(self, name: N, possibilities: I, f: F) -> Node<Self>
+    fn fold<I, F>(self, iter: I, f: F) -> Node<Self>
     where
-        N: Into<String>,
-        I: IntoIterator<Item = (f64, T)> + 'static,
-        T: ToString + Clone + 'static,
-        F: Fn(Self, T) -> Node<Self> + Clone + 'static,
+        Self: 'static,
+        I: IntoIterator,
+        I::Item: Clone + 'static,
+        F: Fn(Self, I::Item) -> Node<Self> + Clone + Copy + 'static,
     {
-        Node {
-            state: self,
-            branches: Branches::Chance(Chance {
-                name: name.into(),
-                possibilities: possibilities
-                    .into_iter()
-                    .map(|(weight, p)| {
-                        let f = f.clone();
-                        Possibility {
-                            name: p.to_string(),
-                            weight,
-                            continuation: Box::new(move |s| f(s, p.clone())),
-                        }
-                    })
-                    .collect(),
-            }),
-        }
+        iter.into_iter()
+            .fold(Node::pending(self), move |node, item| {
+                node.then(move |state| f(state, item))
+            })
     }
 }
 
-pub type ActivePokemon<'a> = ArrayVec<[&'a Pokemon; 4]>;
+pub trait PlayerBase: Debug + Clone + Copy {
+    fn values() -> &'static [Self];
+}
+
+pub trait PlayerStateBase: Debug + Clone {}
 
 pub struct DecisionBuilder<S, T>
 where
-    S: State,
+    S: StateBase,
 {
     player: S::Player,
     name: String,
@@ -49,7 +41,7 @@ where
 
 impl<S, T> DecisionBuilder<S, T>
 where
-    S: State,
+    S: StateBase,
     T: 'static,
 {
     pub fn new<N>(name: N, player: S::Player) -> Self
@@ -108,7 +100,7 @@ where
 
 impl<S, T> DecisionBuilder<S, T>
 where
-    S: State,
+    S: StateBase,
     T: ToString + 'static,
 {
     pub fn choice(self, choice: T) -> Self {
@@ -125,7 +117,7 @@ where
 
 impl<S> DecisionBuilder<S, usize>
 where
-    S: State,
+    S: StateBase,
 {
     pub fn indexed_choices<I>(self, choices: I) -> Self
     where
@@ -139,6 +131,15 @@ where
                 .enumerate()
                 .map(|(i, n)| (n, i)),
         )
+    }
+}
+
+impl<S> DecisionBuilder<S, bool>
+where
+    S: StateBase,
+{
+    pub fn yn_choices(self) -> Self {
+        self.named_choices([("Yes", true), ("No", false)].iter().copied())
     }
 }
 
@@ -171,7 +172,7 @@ where
 
     pub fn build<S, F>(self, state: S, f: F) -> Node<S>
     where
-        S: State,
+        S: StateBase,
         F: FnOnce(S, T) -> Node<S> + Clone + 'static,
     {
         Node {
@@ -216,23 +217,27 @@ where
     }
 }
 
-pub trait Callbacks<S>
+pub trait EventHandler<S>
 where
-    S: State,
+    S: StateBase,
 {
-    fn on_turn_start(&self, state: &S) -> Option<Node<S>> {
-        None
+    fn on_turn_start(&self, state: S) -> Node<S> {
+        Node::pending(state)
     }
 
-    fn on_turn_end(&self, state: &S) -> Option<Node<S>> {
-        None
+    fn on_turn_end(&self, state: S) -> Node<S> {
+        Node::pending(state)
+    }
+
+    fn on_etb(&self, state: S) -> Node<S> {
+        Node::pending(state)
     }
 }
 
 #[derive(Debug)]
 pub struct Node<S>
 where
-    S: State,
+    S: StateBase,
 {
     state: S,
     branches: Branches<S>,
@@ -240,7 +245,7 @@ where
 
 impl<S> Node<S>
 where
-    S: State,
+    S: StateBase,
 {
     pub fn end(state: S) -> Self {
         Self {
@@ -248,22 +253,114 @@ where
             branches: Branches::End,
         }
     }
+
+    pub fn pending(state: S) -> Self {
+        Self {
+            state,
+            branches: Branches::Pending,
+        }
+    }
+}
+
+impl<S> Node<S>
+where
+    S: StateBase + 'static,
+{
+    pub fn then<F>(self, f: F) -> Self
+    where
+        F: FnOnce(S) -> Node<S> + Clone + 'static,
+    {
+        match self.branches {
+            Branches::Chance(c) => Self {
+                state: self.state,
+                branches: Branches::Chance(Chance {
+                    name: c.name,
+                    possibilities: c
+                        .possibilities
+                        .into_iter()
+                        .map(move |p| {
+                            let cont = p.continuation;
+                            let f = f.clone();
+                            Possibility {
+                                name: p.name,
+                                weight: p.weight,
+                                continuation: Box::new(move |s| cont(s).then(f)),
+                            }
+                        })
+                        .collect(),
+                }),
+            },
+            Branches::Decision(d) => Self {
+                state: self.state,
+                branches: Branches::Decision(Decision {
+                    player: d.player,
+                    name: d.name,
+                    choices: d
+                        .choices
+                        .into_iter()
+                        .map(move |c| {
+                            let cont = c.continuation;
+                            let f = f.clone();
+                            Choice {
+                                name: c.name,
+                                continuation: Box::new(move |s| cont(s).then(f)),
+                            }
+                        })
+                        .collect(),
+                }),
+            },
+            Branches::Pending => f(self.state),
+            Branches::End => Node::end(self.state),
+        }
+    }
+}
+
+impl<S> Try for Node<S>
+where
+    S: StateBase + 'static,
+{
+    type Ok = Self;
+    type Error = Self;
+
+    fn into_result(self) -> Result<Self::Ok, Self::Error> {
+        match &self.branches {
+            Branches::End => Err(self),
+            Branches::Chance(_) | Branches::Decision(_) | Branches::Pending => Ok(self),
+        }
+    }
+
+    fn from_error(v: Self::Ok) -> Self {
+        match &v.branches {
+            Branches::Chance(_) | Branches::Decision(_) | Branches::Pending => v,
+            Branches::End => panic!("Invalid Ok: {:?}", v),
+        }
+    }
+
+    fn from_ok(v: Self::Error) -> Self {
+        match &v.branches {
+            Branches::Chance(_) | Branches::Decision(_) | Branches::Pending => {
+                panic!("Invalid Error: {:?}", v)
+            }
+            Branches::End => v,
+        }
+    }
 }
 
 #[derive(Debug)]
 pub enum Branches<S>
 where
-    S: State,
+    S: StateBase,
 {
     Chance(Chance<S>),
     Decision(Decision<S>),
+    Pending,
     End,
 }
 
 #[derive(Debug)]
 pub struct Chance<S>
 where
-    S: State,
+    S: StateBase,
 {
     name: String,
     possibilities: Vec<Possibility<S>>,
@@ -271,7 +368,7 @@ where
 
 pub struct Possibility<S>
 where
-    S: State,
+    S: StateBase,
 {
     name: String,
     continuation: Box<dyn FnOnce(S) -> Node<S>>,
@@ -280,7 +377,7 @@ where
 
 impl<S: Debug> Debug for Possibility<S>
 where
-    S: State,
+    S: StateBase,
 {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         f.debug_struct("Possibility")
@@ -293,7 +390,7 @@ where
 #[derive(Debug)]
 pub struct Decision<S>
 where
-    S: State,
+    S: StateBase,
 {
     name: String,
     player: S::Player,
@@ -302,7 +399,7 @@ where
 
 pub struct Choice<S>
 where
-    S: State,
+    S: StateBase,
 {
     name: String,
     continuation: Box<dyn FnOnce(S) -> Node<S>>,
@@ -310,7 +407,7 @@ where
 
 impl<S: Debug> Debug for Choice<S>
 where
-    S: State,
+    S: StateBase,
 {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         f.debug_struct("Choice").field("name", &self.name).finish()

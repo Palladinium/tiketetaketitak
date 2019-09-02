@@ -1,5 +1,6 @@
-use crate::state::{Callbacks, Node, State};
+use crate::state::{EventHandler, StateBase};
 
+#[derive(Debug, Clone)]
 pub enum Effect {}
 
-impl<S: State> Callbacks<S> for Effect {}
+impl<S: StateBase> EventHandler<S> for Effect {}

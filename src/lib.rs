@@ -1,4 +1,4 @@
-#![feature(trait_alias)]
+#![feature(try_trait)]
 
 pub mod ability;
 pub mod effect;
